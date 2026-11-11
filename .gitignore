@@ -1,0 +1,36 @@
+# Build and dependency directories
+build/
+*/build/
+.gradle/
+*.class
+
+# Android specific
+local.properties
+.navigation/
+captures/
+output.json
+.cxx/
+*.apk
+*.ap_
+*.aab
+*.dex
+
+# IDE and Editor
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs & temp
+*.log
+tmp/
+

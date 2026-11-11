@@ -1,0 +1,4 @@
+rootProject.name = 'webrtc-scrcpy'
+include ':android:core'
+include ':android:app'
+

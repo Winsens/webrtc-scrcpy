@@ -1,0 +1,13 @@
+{
+  "name": "webrtc-scrcpy-signaling",
+  "version": "1.0.0",
+  "description": "WAN Signaling relay server for webrtc-scrcpy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.13.0"
+  }
+}
+

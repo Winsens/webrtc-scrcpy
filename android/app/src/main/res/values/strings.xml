@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">WebRTC-Scrcpy</string>
+    <string name="accessibility_desc">Used by WebRTC-Scrcpy to inject touch and gesture events from the web browser</string>
+    <string name="start_service">Start Remote Service</string>
+    <string name="stop_service">Stop Service</string>
+    <string name="service_running">Remote Service is Running</string>
+    <string name="service_stopped">Service Stopped</string>
+    <string name="web_access_tip">Open this URL in a browser on the same LAN to control:</string>
+</resources>
+
