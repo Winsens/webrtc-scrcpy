@@ -1,0 +1,225 @@
+:root {
+    --bg-color: #0b0d13;
+    --panel-bg: rgba(23, 27, 38, 0.85);
+    --border-color: rgba(255, 255, 255, 0.1);
+    --text-color: #e0e6ed;
+    --accent-color: #3b82f6;
+    --accent-hover: #2563eb;
+    --success-color: #10b981;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body, html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--bg-color);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text-color);
+}
+
+#app-container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+/* Top Status Bar */
+#header-bar {
+    height: 44px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    z-index: 10;
+    backdrop-filter: blur(10px);
+}
+
+.brand {
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.brand span {
+    color: var(--accent-color);
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #ffaa00;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.tool-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tool-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.tool-btn.active {
+    background: var(--accent-color);
+    color: #fff;
+}
+
+/* Video Display & Touch Overlay Area */
+#screen-wrapper {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+#screen-content {
+    position: relative;
+    max-width: 100%;
+    max-height: 100%;
+    display: flex;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+video {
+    max-width: 100vw;
+    max-height: calc(100vh - 44px - 56px);
+    width: auto;
+    height: auto;
+    display: block;
+    object-fit: contain;
+    background-color: #000;
+}
+
+#touch-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: default;
+    touch-action: none;
+    z-index: 5;
+}
+
+/* Bottom Virtual Navigation Bar */
+#navbar {
+    height: 56px;
+    background: var(--panel-bg);
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 32px;
+    z-index: 10;
+    backdrop-filter: blur(10px);
+}
+
+.nav-item {
+    background: transparent;
+    border: none;
+    color: var(--text-color);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 6px;
+    transition: background 0.15s ease;
+}
+
+.nav-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.nav-item:active {
+    transform: scale(0.92);
+}
+
+.nav-item svg {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+}
+
+.nav-item span {
+    font-size: 11px;
+}
+
+/* Real-time Stats Overlay */
+#stats-overlay {
+    position: absolute;
+    top: 54px;
+    left: 16px;
+    background: rgba(15, 20, 30, 0.88);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    z-index: 20;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    min-width: 180px;
+}
+
+#stats-overlay.hidden {
+    display: none;
+}
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.stat-row:last-child {
+    margin-bottom: 0;
+}
+
+.stat-label {
+    color: #8b949e;
+}
+
+.stat-value {
+    color: #58a6ff;
+    font-weight: 600;
+}
+
