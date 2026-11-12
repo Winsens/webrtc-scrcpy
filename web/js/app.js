@@ -18,13 +18,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnRotate = document.getElementById('btn-rotate');
     const btnClipboard = document.getElementById('btn-clipboard');
     const btnStats = document.getElementById('btn-stats');
-    const btnAudio = document.getElementById('btn-audio');
 
-    let isAudioEnabled = false;
-
-    // Connect to the current page's WebSocket signaling endpoint by default
+    // Connect to the current page's WebSocket signaling endpoint by default.
+    // The device only accepts the signaling socket with the access token from the URL it shows.
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const defaultWsUrl = `${wsProto}//${location.host}/ws`;
+    const accessToken = new URLSearchParams(location.search).get('token') || '';
+    const defaultWsUrl = `${wsProto}//${location.host}/ws?token=${encodeURIComponent(accessToken)}`;
 
     const client = new WebRtcClient({
         onStatusChange: (status, detail) => {
@@ -53,8 +52,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Start connection
-    client.connect(defaultWsUrl);
+    // Start connection, using the STUN/TURN servers the device is configured with (if any)
+    if (accessToken) {
+        fetch(`/config?token=${encodeURIComponent(accessToken)}`, { cache: 'no-store' })
+            .then(r => (r.ok ? r.json() : null))
+            .catch(() => null)
+            .then(config => {
+                if (config && Array.isArray(config.iceServers) && config.iceServers.length) {
+                    client.options.iceServers = config.iceServers;
+                }
+                client.connect(defaultWsUrl);
+            });
+    } else {
+        statusText.innerText = 'Missing access token: open the full URL shown on the device (it ends in ?token=...)';
+        statusIndicator.style.backgroundColor = '#ff3333';
+    }
 
     // ==========================================
     // 1. Touch & mouse coordinate calculation (accurately maps letterboxing/pillarboxing)
@@ -272,25 +284,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Performance stats overlay toggle
     btnStats.addEventListener('click', () => {
         statsOverlay.classList.toggle('hidden');
-    });
-
-    // Audio unmute toggle (handles browser autoplay policy)
-    btnAudio.addEventListener('click', () => {
-        if (!isAudioEnabled) {
-            video.muted = false;
-            video.play().then(() => {
-                isAudioEnabled = true;
-                btnAudio.classList.add('active');
-                btnAudio.innerText = '🔊 Audio On';
-            }).catch(e => {
-                alert('Failed to play audio: ' + e.message);
-            });
-        } else {
-            video.muted = true;
-            isAudioEnabled = false;
-            btnAudio.classList.remove('active');
-            btnAudio.innerText = '🔇 Audio Off';
-        }
     });
 
     // Proactively close WebRTC and signaling on unload to speed up reconnection on Android side

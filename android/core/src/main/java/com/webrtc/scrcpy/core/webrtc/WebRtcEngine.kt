@@ -2,7 +2,7 @@ package com.webrtc.scrcpy.core.webrtc
 
 import android.content.Context
 import android.util.Log
-import com.webrtc.scrcpy.core.capture.MediaProjectionVideoCapturer
+import com.webrtc.scrcpy.core.capture.RefreshableCapturer
 import com.webrtc.scrcpy.core.capture.ScreenGeometry
 import com.webrtc.scrcpy.core.input.InputInjector
 import com.webrtc.scrcpy.core.protocol.ControlEvent
@@ -15,7 +15,8 @@ import java.nio.ByteBuffer
  */
 class WebRtcEngine(
     private val context: Context,
-    private val inputInjector: InputInjector
+    private val inputInjector: InputInjector,
+    private val iceServers: List<IceServerConfig> = emptyList()
 ) {
     private val TAG = "WebRtcEngine"
 
@@ -24,8 +25,6 @@ class WebRtcEngine(
     private var peerConnection: PeerConnection? = null
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
-    private var audioSource: AudioSource? = null
-    private var audioTrack: AudioTrack? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var videoCapturer: VideoCapturer? = null
 
@@ -135,18 +134,15 @@ class WebRtcEngine(
         videoTrack = pcf.createVideoTrack("video_track_screen", videoSource)
         videoTrack?.setEnabled(true)
 
-        // Default audio source
-        val audioConstraints = MediaConstraints()
-        audioSource = pcf.createAudioSource(audioConstraints)
-        audioTrack = pcf.createAudioTrack("audio_track_system", audioSource)
-        audioTrack?.setEnabled(true)
+        // No audio track: WebRTC's default audio source is the microphone, and this WebRTC build
+        // cannot be fed AudioPlaybackCapture (system audio) data, so only video is streamed.
 
         // Touches are normalised over the frame, so map them onto the real display size
         val displaySize = ScreenGeometry.realDisplaySize(context)
         val inputWidth = displaySize?.width ?: width
         val inputHeight = displaySize?.height ?: height
         inputInjector.setScreenDimensions(inputWidth, inputHeight)
-        Log.i(TAG, "Started video and audio tracks: capture=${width}x${height} @ ${fps}fps, touch=${inputWidth}x${inputHeight}")
+        Log.i(TAG, "Started video track: capture=${width}x${height} @ ${fps}fps, touch=${inputWidth}x${inputHeight}")
     }
 
     /**
@@ -166,8 +162,9 @@ class WebRtcEngine(
             peerConnection = null
         }
 
-        // Skip external Google STUN for direct LAN connections to avoid STUN timeouts slowing connection/refresh
-        val rtcConfig = PeerConnection.RTCConfiguration(emptyList()).apply {
+        // No STUN/TURN by default: direct LAN connections need none, and an unreachable STUN server
+        // slows connection setup. Configure servers for NAT or relayed (e.g. adb tunnel) setups.
+        val rtcConfig = PeerConnection.RTCConfiguration(iceServers.map { it.toIceServer() }).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
         }
@@ -186,7 +183,7 @@ class WebRtcEngine(
                 if (state == PeerConnection.IceConnectionState.CONNECTED ||
                     state == PeerConnection.IceConnectionState.COMPLETED
                 ) {
-                    (videoCapturer as? MediaProjectionVideoCapturer)?.requestRefreshFrame()
+                    (videoCapturer as? RefreshableCapturer)?.requestRefreshFrame()
                 }
             }
 
@@ -217,7 +214,6 @@ class WebRtcEngine(
             override fun onSetSuccess() {
                 try {
                     var videoSender: RtpSender? = null
-                    var audioTrackAssigned = false
 
                     createdPc.transceivers?.forEach { transceiver ->
                         if (transceiver.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
@@ -228,21 +224,14 @@ class WebRtcEngine(
                             }
                             transceiver.direction = RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
                         } else if (transceiver.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO) {
-                            audioTrack?.let {
-                                transceiver.sender.setTrack(it, false)
-                                transceiver.sender.setStreams(listOf("stream_screen"))
-                                audioTrackAssigned = true
-                            }
-                            transceiver.direction = RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
+                            // No audio is streamed (see startScreenStream)
+                            transceiver.direction = RtpTransceiver.RtpTransceiverDirection.INACTIVE
                         }
                     }
 
                     // Fallback for older clients or unmatched transceivers
                     if (videoSender == null && videoTrack != null) {
                         videoSender = createdPc.addTrack(videoTrack, listOf("stream_screen"))
-                    }
-                    if (!audioTrackAssigned && audioTrack != null) {
-                        createdPc.addTrack(audioTrack, listOf("stream_screen"))
                     }
 
                     videoSender?.let { sender ->
@@ -272,7 +261,7 @@ class WebRtcEngine(
                             createdPc.setLocalDescription(object : SdpObserverAdapter() {
                                 override fun onSetSuccess() {
                                     onAnswerCreated(ans)
-                                    (videoCapturer as? MediaProjectionVideoCapturer)?.requestRefreshFrame()
+                                    (videoCapturer as? RefreshableCapturer)?.requestRefreshFrame()
                                 }
                             }, ans)
                         }
@@ -332,17 +321,33 @@ class WebRtcEngine(
         })
     }
 
+    @Synchronized
     fun release() {
-        try {
+        // Dispose in dependency order: connection, then track, capturer and source, then the factory
+        fun step(name: String, block: () -> Unit) {
+            try {
+                block()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error releasing $name: ${e.message}")
+            }
+        }
+        step("PeerConnection") { peerConnection?.dispose() }
+        peerConnection = null
+        step("video track") { videoTrack?.dispose() }
+        videoTrack = null
+        step("capturer") {
             videoCapturer?.stopCapture()
             videoCapturer?.dispose()
-            surfaceTextureHelper?.dispose()
-            peerConnection?.close()
-            peerConnectionFactory?.dispose()
-            eglBase?.release()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error releasing WebRtcEngine: ${e.message}")
         }
+        videoCapturer = null
+        step("video source") { videoSource?.dispose() }
+        videoSource = null
+        step("SurfaceTextureHelper") { surfaceTextureHelper?.dispose() }
+        surfaceTextureHelper = null
+        step("PeerConnectionFactory") { peerConnectionFactory?.dispose() }
+        peerConnectionFactory = null
+        step("EglBase") { eglBase?.release() }
+        eglBase = null
     }
 
     open class SdpObserverAdapter : SdpObserver {

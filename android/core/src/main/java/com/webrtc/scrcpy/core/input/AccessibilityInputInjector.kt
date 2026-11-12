@@ -5,13 +5,17 @@ import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.graphics.Path
 import android.hardware.display.DisplayManager
+import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
+import android.view.KeyEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresApi
 import com.webrtc.scrcpy.core.protocol.ControlEvent
 import kotlin.math.hypot
@@ -252,7 +256,9 @@ class AccessibilityInputInjector : InputInjector {
         dispatchedY = nextY
         strokeSegmentCount++
 
-        val keepGoing = isPointerDown && strokeSegmentCount < 80
+        // Keep streaming for as long as the pointer is held; each dispatched gesture is only one
+        // short segment, so long drags do not hit the per-gesture duration limit
+        val keepGoing = isPointerDown
         try {
             val nextStroke = prevStroke.continueStroke(segPath, 0, STREAM_STEP_MS, keepGoing)
             currentStroke = if (keepGoing) nextStroke else null
@@ -285,7 +291,123 @@ class AccessibilityInputInjector : InputInjector {
         strokeSegmentCount = 0
     }
 
-    override fun injectKey(key: ControlEvent.Key) {}
+    /**
+     * Accessibility services cannot inject key events, so editing keys are applied to the
+     * focused text field directly, and navigation keys use global actions.
+     */
+    override fun injectKey(key: ControlEvent.Key) {
+        if (key.action != 0) return // act on key down only
+        val service = serviceInstance ?: return
+        mainHandler.post { handleKeyOnMain(service, key.keyCode) }
+    }
+
+    private fun handleKeyOnMain(service: AccessibilityService, keyCode: Int) {
+        when (keyCode) {
+            KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_BACK ->
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            KeyEvent.KEYCODE_HOME ->
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+            KeyEvent.KEYCODE_SPACE -> insertText(service, " ")
+            KeyEvent.KEYCODE_TAB -> insertText(service, "\t")
+            KeyEvent.KEYCODE_DEL -> deleteText(service, forward = false)
+            KeyEvent.KEYCODE_FORWARD_DEL -> deleteText(service, forward = true)
+            KeyEvent.KEYCODE_ENTER -> pressEnter(service)
+            KeyEvent.KEYCODE_DPAD_LEFT -> moveCursor(service) { cursor, _ -> cursor - 1 }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> moveCursor(service) { cursor, _ -> cursor + 1 }
+            KeyEvent.KEYCODE_MOVE_HOME -> moveCursor(service) { _, _ -> 0 }
+            KeyEvent.KEYCODE_MOVE_END -> moveCursor(service) { _, length -> length }
+            else -> Log.d(TAG, "Key $keyCode is not supported in accessibility mode")
+        }
+    }
+
+    /** Editable text field that currently has input focus, or null. */
+    private fun focusedEditable(service: AccessibilityService): AccessibilityNodeInfo? {
+        val node = service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
+        return if (node.isEditable) node else null
+    }
+
+    /** Current text of a field, treating a visible hint as empty. */
+    private fun currentText(node: AccessibilityNodeInfo): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText) return ""
+        return node.text?.toString() ?: ""
+    }
+
+    /** Selection of a field clamped to its text; a missing selection means "at the end". */
+    private fun selection(node: AccessibilityNodeInfo, length: Int): Pair<Int, Int> {
+        var start = node.textSelectionStart
+        var end = node.textSelectionEnd
+        if (start < 0 || end < 0) {
+            start = length
+            end = length
+        }
+        start = start.coerceIn(0, length)
+        end = end.coerceIn(0, length)
+        return minOf(start, end) to maxOf(start, end)
+    }
+
+    private fun setTextAndCursor(node: AccessibilityNodeInfo, text: String, cursor: Int) {
+        val textArgs = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs)) {
+            Log.w(TAG, "ACTION_SET_TEXT was rejected by the focused field")
+            return
+        }
+        setCursor(node, cursor)
+    }
+
+    private fun setCursor(node: AccessibilityNodeInfo, cursor: Int) {
+        val selArgs = Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
+        }
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
+    }
+
+    private fun insertText(service: AccessibilityService, insert: String) {
+        val node = focusedEditable(service) ?: run {
+            Log.d(TAG, "No focused editable field; dropping text input")
+            return
+        }
+        val text = currentText(node)
+        val (start, end) = selection(node, text.length)
+        setTextAndCursor(node, text.substring(0, start) + insert + text.substring(end), start + insert.length)
+    }
+
+    private fun deleteText(service: AccessibilityService, forward: Boolean) {
+        val node = focusedEditable(service) ?: return
+        val text = currentText(node)
+        val (start, end) = selection(node, text.length)
+        when {
+            start != end -> setTextAndCursor(node, text.substring(0, start) + text.substring(end), start)
+            !forward && start > 0 -> {
+                // Remove a whole surrogate pair (e.g. emoji) rather than half of it
+                val from = text.offsetByCodePoints(start, -1)
+                setTextAndCursor(node, text.substring(0, from) + text.substring(start), from)
+            }
+            forward && start < text.length -> {
+                val to = text.offsetByCodePoints(start, 1)
+                setTextAndCursor(node, text.substring(0, start) + text.substring(to), start)
+            }
+        }
+    }
+
+    private fun pressEnter(service: AccessibilityService) {
+        val node = focusedEditable(service) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Triggers the field's IME action (search, send, next, ...) like a real Enter key
+            val imeEnter = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+            if (node.performAction(imeEnter)) return
+        }
+        if (node.isMultiLine) insertText(service, "\n")
+    }
+
+    private fun moveCursor(service: AccessibilityService, target: (cursor: Int, length: Int) -> Int) {
+        val node = focusedEditable(service) ?: return
+        val length = currentText(node).length
+        val (start, _) = selection(node, length)
+        setCursor(node, target(start, length).coerceIn(0, length))
+    }
 
     @RequiresApi(Build.VERSION_CODES.N)
     override fun injectScroll(scroll: ControlEvent.Scroll) {
@@ -316,18 +438,31 @@ class AccessibilityInputInjector : InputInjector {
         service.dispatchGesture(gesture, null, null)
     }
 
-    override fun injectText(text: String) {}
+    override fun injectText(text: String) {
+        if (text.isEmpty()) return
+        val service = serviceInstance ?: return
+        mainHandler.post { insertText(service, text) }
+    }
 
     override fun injectCommand(commandId: Int) {
         val service = serviceInstance ?: return
         when (commandId) {
+            ControlEvent.Command.CMD_VOLUME_UP -> adjustVolume(service, AudioManager.ADJUST_RAISE)
+            ControlEvent.Command.CMD_VOLUME_DOWN -> adjustVolume(service, AudioManager.ADJUST_LOWER)
             ControlEvent.Command.CMD_BACK -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             ControlEvent.Command.CMD_HOME -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
             ControlEvent.Command.CMD_RECENTS -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
             ControlEvent.Command.CMD_POWER -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
             }
+            else -> Log.d(TAG, "Command $commandId is not supported in accessibility mode")
         }
+    }
+
+    private fun adjustVolume(context: Context, direction: Int) {
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        // Same behaviour as the hardware volume keys: adjusts whichever stream is active
+        audio.adjustSuggestedStreamVolume(direction, AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI)
     }
 }
 

@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
+import android.media.projection.MediaProjection
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.DisplayMetrics
@@ -34,6 +37,7 @@ class RemoteControlService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var embeddedServer: EmbeddedServer? = null
     private var webRtcEngine: WebRtcEngine? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
         const val ACTION_START = "com.webrtc.scrcpy.START"
@@ -55,7 +59,9 @@ class RemoteControlService : Service() {
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WebRtcScrcpy:WakeLock")
-        wakeLock?.acquire(2 * 60 * 60 * 1000L)
+        // Held for the whole session; released in onDestroy
+        @Suppress("WakelockTimeout")
+        wakeLock?.acquire()
 
         try {
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -153,17 +159,25 @@ class RemoteControlService : Service() {
         }
         val injector = createDynamicInputInjector()
 
-        val engine = WebRtcEngine(this, injector)
+        val iceServers = IceServerStore.get(this)
+        val engine = WebRtcEngine(this, injector, iceServers)
         this.webRtcEngine = engine
 
         // Capture at the display's own aspect ratio (short side capped at 720), 30fps,
         // so the frame has no black bars and touch mapping stays exact
         val captureSize = ScreenGeometry.realDisplaySize(this)?.let { ScreenGeometry.captureSize(it) } ?: Size(720, 1280)
-        val capturer = MediaProjectionVideoCapturer(mediaProjectionResultData)
+        // Stop the service when the user or system revokes screen capture, instead of
+        // reporting "running" with a frozen stream
+        val capturer = MediaProjectionVideoCapturer(mediaProjectionResultData, object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.w(TAG, "Screen capture was stopped; stopping service")
+                mainHandler.post { stopSelf() }
+            }
+        })
         engine.startScreenStream(capturer, captureSize.width, captureSize.height, 30)
 
         // Start local HTTP + WebSocket signaling server (port 8080)
-        val server = EmbeddedServer(8080, this, object : EmbeddedServer.SignalingListener {
+        val server = EmbeddedServer(8080, this, AccessTokenStore.get(this), object : EmbeddedServer.SignalingListener {
             override fun onOfferReceived(sdp: String) {
                 engine.handleOffer(sdp) { answer ->
                     this@RemoteControlService.embeddedServer?.sendAnswer(answer.description)
@@ -173,7 +187,7 @@ class RemoteControlService : Service() {
             override fun onIceCandidateReceived(sdpMid: String, sdpMLineIndex: Int, candidate: String) {
                 engine.addRemoteIceCandidate(IceCandidate(sdpMid, sdpMLineIndex, candidate))
             }
-        })
+        }, iceServers)
 
         engine.onLocalIceCandidate = { candidate ->
             this.embeddedServer?.sendIceCandidate(candidate.sdpMid, candidate.sdpMLineIndex, candidate.sdp)

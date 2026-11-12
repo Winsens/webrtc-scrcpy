@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        IceServerStore.applyFromIntent(this, intent)
 
         tvStatusTitle = findViewById(R.id.tv_status_title)
         tvUrlTip = findViewById(R.id.tv_url_tip)
@@ -143,7 +144,7 @@ class MainActivity : AppCompatActivity() {
             tvAccessUrl.visibility = View.VISIBLE
 
             val ip = getLocalIpAddress() ?: "127.0.0.1"
-            tvAccessUrl.text = "http://$ip:8080"
+            tvAccessUrl.text = "http://$ip:8080/?token=${AccessTokenStore.get(this)}"
         } else {
             tvStatusTitle.text = getString(R.string.service_stopped)
             btnToggle.text = getString(R.string.start_service)
@@ -169,6 +170,11 @@ class MainActivity : AppCompatActivity() {
             ex.printStackTrace()
         }
         return null
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        IceServerStore.applyFromIntent(this, intent)
     }
 
     override fun onResume() {

@@ -4,19 +4,49 @@ import android.content.Context
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
+import com.webrtc.scrcpy.core.webrtc.IceServerConfig
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.net.URI
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * On-device lightweight HTTP static asset host and WebSocket signaling server
+ * On-device lightweight HTTP static asset host and WebSocket signaling server.
+ *
+ * The signaling WebSocket gives full screen and input control, so it requires [accessToken]
+ * (passed by the page as `?token=`) and rejects cross-origin browser pages. The static page
+ * itself is public; it contains no secrets.
  */
 class EmbeddedServer(
     port: Int,
     private val context: Context?,
-    private val signalingListener: SignalingListener
+    private val accessToken: String,
+    private val signalingListener: SignalingListener,
+    private val iceServers: List<IceServerConfig> = emptyList()
 ) : NanoWSD(port) {
+    companion object {
+        // In the companion so it exists before the instance init block preloads assets
+        private val daemonArchives: List<java.io.File> by lazy {
+            val classPath = System.getProperty("java.class.path").orEmpty()
+                .split(java.io.File.pathSeparatorChar)
+                .filter { it.isNotBlank() }
+            (classPath + "/data/local/tmp/app-debug.apk")
+                .distinct()
+                .map { java.io.File(it) }
+                .filter { it.isFile }
+        }
+
+        /** Random URL-safe token, about 128 bits. */
+        fun generateAccessToken(): String {
+            val alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+            val random = SecureRandom()
+            return (1..22).map { alphabet[random.nextInt(alphabet.length)] }.joinToString("")
+        }
+    }
+
     private val TAG = "EmbeddedServer"
 
     private data class CachedAsset(
@@ -52,6 +82,37 @@ class EmbeddedServer(
         }
     }
 
+    override fun serve(session: IHTTPSession): Response {
+        if (isWebsocketRequested(session)) {
+            val rejection = signalingRejection(session)
+            if (rejection != null) {
+                Log.w(TAG, "Rejected signaling WebSocket from ${session.remoteIpAddress}: $rejection")
+                return newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Forbidden")
+            }
+        }
+        return super.serve(session)
+    }
+
+    private fun hasValidToken(session: IHTTPSession): Boolean {
+        val supplied = session.parameters["token"]?.firstOrNull() ?: return false
+        return MessageDigest.isEqual(supplied.toByteArray(), accessToken.toByteArray())
+    }
+
+    /** Reason to refuse a signaling WebSocket handshake, or null if it is allowed. */
+    private fun signalingRejection(session: IHTTPSession): String? {
+        if (session.uri != "/ws") return "unknown path ${session.uri}"
+        if (!hasValidToken(session)) return "missing or bad token"
+        // Browsers always send Origin; it must be this server, so other sites cannot connect
+        val origin = session.headers["origin"]
+        if (origin != null) {
+            val originHost = try { URI(origin).authority } catch (_: Exception) { null }
+            if (originHost == null || !originHost.equals(session.headers["host"], ignoreCase = true)) {
+                return "cross-origin request from $origin"
+            }
+        }
+        return null
+    }
+
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
         return SignalingWebSocket(handshake)
     }
@@ -63,6 +124,16 @@ class EmbeddedServer(
         return when {
             uri == "/" || uri == "/index.html" -> {
                 serveAsset(session, "web/index.html", "text/html; charset=utf-8")
+            }
+            // ICE servers for the page; behind the token because TURN credentials are secret
+            uri == "/config" -> {
+                if (hasValidToken(session)) {
+                    newFixedLengthResponse(Response.Status.OK, "application/json", IceServerConfig.toJson(iceServers)).apply {
+                        addHeader("Cache-Control", "no-store")
+                    }
+                } else {
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Forbidden")
+                }
             }
             uri == "/favicon.ico" -> {
                 newFixedLengthResponse(Response.Status.NO_CONTENT, "image/x-icon", "")
@@ -83,22 +154,22 @@ class EmbeddedServer(
             context?.assets?.open(assetPath)?.use { return it.readBytes() }
         } catch (_: Exception) {}
 
-        // 2. Try reading directly from APK zip (for app_process daemon mode)
-        try {
-            val apkPath = "/data/local/tmp/app-debug.apk"
-            val file = java.io.File(apkPath)
-            if (file.exists()) {
-                java.util.zip.ZipFile(file).use { zip ->
+        // 2. app_process daemon mode: the system context has no assets of ours, so read them
+        //    from the APK/jar on the CLASSPATH (scripts/run_daemon.sh pushes the APK there)
+        for (archive in daemonArchives) {
+            try {
+                java.util.zip.ZipFile(archive).use { zip ->
                     val entry = zip.getEntry("assets/$assetPath") ?: zip.getEntry(assetPath)
                     if (entry != null) {
                         zip.getInputStream(entry).use { return it.readBytes() }
                     }
                 }
-            }
-        } catch (_: Exception) {}
+            } catch (_: Exception) {}
+        }
 
         return null
     }
+
 
     private fun loadAssetCached(assetPath: String, mimeType: String): CachedAsset? {
         assetCache[assetPath]?.let { return it }
