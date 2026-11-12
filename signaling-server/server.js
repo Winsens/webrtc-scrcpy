@@ -11,7 +11,16 @@ const wss = new WebSocketServer({ server });
 const rooms = new Map(); // roomId -> { phone: ws, clients: Set<ws> }
 
 wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    // A socket error without a listener is rethrown and would crash the whole relay
+    ws.on('error', (err) => console.warn(`[!] WebSocket error: ${err.message}`));
+
+    let url;
+    try {
+        url = new URL(req.url, 'http://localhost');
+    } catch (err) {
+        ws.close(1008, 'Bad request URL');
+        return;
+    }
     const roomId = url.searchParams.get('room') || 'default';
     const role = url.searchParams.get('role') || 'client'; // 'phone' or 'client'
 

@@ -22,7 +22,7 @@ Conventional browser-based Android remote control approaches often rely on an ex
 | **Transport** | WebSocket (TCP, prone to head-of-line blocking) | **WebRTC (UDP / SRTP / SCTP with adaptive congestion control)** |
 | **Control Channel** | Text / JSON over WebSocket | **Compact binary protocol over `RTCDataChannel`** |
 | **End-to-End Latency** | Typically 150ms - 300ms | **LAN 20ms - 50ms, WAN 50ms - 100ms** |
-| **Audio Support** | Requires external audio routing | **Native `AudioPlaybackCapture` system audio (Android 10+)** |
+| **Audio Support** | Requires external audio routing | Not yet: video only (the bundled WebRTC build cannot take `AudioPlaybackCapture` input) |
 | **Deployment** | Host relay + Web server | **Standalone Android APK / AOSP headless daemon** |
 
 ---
@@ -65,7 +65,7 @@ Conventional browser-based Android remote control approaches often rely on an ex
 
 ## ✨ Key Features
 
-- **All-in-One On-Device Hosting**: Includes a built-in lightweight HTTP/WebSocket server on the phone. Open `http://<PHONE_IP>:8080` from any PC, phone, or tablet browser on the same LAN to control immediately with zero external dependencies.
+- **All-in-One On-Device Hosting**: Includes a built-in lightweight HTTP/WebSocket server on the phone. Open the `http://<PHONE_IP>:8080/?token=...` URL the device shows from any PC, phone, or tablet browser on the same LAN to control immediately with zero external dependencies.
 - **Ultra-Low End-to-End Latency**: Built on native WebRTC pipelines with measured LAN latency between 20ms and 50ms.
 - **High-Speed `RTCDataChannel` Control**: Touch and keyboard events are packed into a compact custom binary protocol (only 10-13 bytes per packet) for responsive gesture control.
 - **Dual-Driver Input Injection**:
@@ -136,9 +136,11 @@ adb install android/app/build/outputs/apk/release/app-release.apk
 2. Tap **Start Remote Service** and grant the system screen capture permission prompt.
 3. The app will display your device's LAN URL, for example:
    ```text
-   http://192.168.1.108:8080
+   http://192.168.1.108:8080/?token=Xk3...
    ```
 4. Open that URL in a browser on any computer or tablet on the same Wi-Fi/LAN to view the screen and control it with mouse, touch, and keyboard!
+
+The `token` is required: the device refuses the signaling connection without it, so other people on the same network cannot take control. Keep the full URL private. The app keeps the same token across restarts.
 
 ---
 
@@ -147,8 +149,24 @@ adb install android/app/build/outputs/apk/release/app-release.apk
 On cloud phones (e.g., Redroid, Genymotion) or devices with ADB/Root access, you can run headless as a background daemon without installing the UI app:
 
 ```bash
-# Grant execute permission and start daemon
+# Build the APK, then push it and start the daemon
+./gradlew :android:app:assembleDebug
 ./scripts/run_daemon.sh 8080
+```
+
+The script pushes the APK (code and web assets) and the WebRTC native library for the device's ABI to `/data/local/tmp`, forwards the port, and starts `DaemonMain`, which prints the URL to open, including its access token. A new random token is used on each run; set `TOKEN=<value>` to keep a stable URL, and `APK=<path>` to run a different build.
+
+### When the browser cannot reach the phone's IP
+
+WebRTC media goes directly between the browser and the phone, so `adb forward` alone is not enough when the phone's IP is unreachable from the browser (cloud phones behind NAT, adb over a port mapping). Relay the media through a TURN server instead; both ends use the same setting, and the page fetches it from the phone (`/config`, protected by the access token):
+
+```bash
+# Daemon mode: a TURN server reachable from the phone, here via adb reverse (TURN over TCP)
+adb reverse tcp:3479 tcp:3479
+ICE_SERVER='turn:127.0.0.1:3479?transport=tcp|user|pass' ./scripts/run_daemon.sh 8080
+
+# App mode (debug builds): stored by the app, used from the next service start
+adb shell am start -n com.webrtc.scrcpy/.app.MainActivity --es ice_server 'turn:127.0.0.1:3479?transport=tcp|user|pass'
 ```
 
 Running with Shell (UID 2000) privileges provides key benefits:

@@ -19,7 +19,7 @@ import org.webrtc.VideoCapturer
 class MediaProjectionVideoCapturer(
     private val mediaProjectionPermissionResultData: Intent,
     private val mediaProjectionCallback: MediaProjection.Callback? = null
-) : VideoCapturer {
+) : VideoCapturer, RefreshableCapturer {
     private val TAG = "MediaProjectionCapturer"
 
     private var context: Context? = null
@@ -54,6 +54,7 @@ class MediaProjectionVideoCapturer(
     private var lastFrameTimeMs = 0L
 
     private var captureHandler: Handler? = null
+    private val frameForwarder = MonotonicFrameForwarder { capturerObserver }
 
     private val idleKeepAliveRunnable = object : Runnable {
         override fun run() {
@@ -69,7 +70,7 @@ class MediaProjectionVideoCapturer(
     /**
      * Re-emit the latest texture frame for IDR keyframe encoding when a browser connects or refreshes, avoiding prolonged 0 FPS on static screens
      */
-    fun requestRefreshFrame() {
+    override fun requestRefreshFrame() {
         val helper = surfaceTextureHelper ?: return
         val h = captureHandler ?: return
         if (!isCapturing || isDisposed) return
@@ -120,7 +121,7 @@ class MediaProjectionVideoCapturer(
             if (frameCount == 1L || frameCount % 300L == 0L) {
                 Log.d(TAG, "Captured screen frame #$frameCount: ${videoFrame.rotatedWidth}x${videoFrame.rotatedHeight}")
             }
-            capturerObserver?.onFrameCaptured(videoFrame)
+            frameForwarder.forward(videoFrame)
         }
         handler.removeCallbacks(idleKeepAliveRunnable)
         handler.postDelayed(idleKeepAliveRunnable, 500L)

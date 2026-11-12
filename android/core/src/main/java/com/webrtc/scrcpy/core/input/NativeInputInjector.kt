@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
 import android.view.InputEvent
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.webrtc.scrcpy.core.protocol.ControlEvent
@@ -21,6 +22,12 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
 
     private var injectInputEventMethod: Method? = null
     private var inputManagerInstance: Any? = null
+
+    private companion object {
+        // InputManager.INJECT_INPUT_EVENT_MODE_* (hidden API)
+        const val INJECT_MODE_ASYNC = 0
+        const val INJECT_MODE_WAIT_FOR_FINISH = 2
+    }
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -106,11 +113,26 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
         }
     }
 
-    override fun injectKey(key: ControlEvent.Key) {
+    private val keyCharacterMap: KeyCharacterMap? by lazy {
+        try {
+            KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+        } catch (e: Exception) {
+            Log.w(TAG, "Virtual keyboard KeyCharacterMap unavailable: ${e.message}")
+            null
+        }
+    }
+
+    private fun keyEvent(action: Int, keyCode: Int, metaState: Int): KeyEvent {
         val now = SystemClock.uptimeMillis()
+        return KeyEvent(
+            now, now, action, keyCode, 0, metaState,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
+        )
+    }
+
+    override fun injectKey(key: ControlEvent.Key) {
         val action = if (key.action == 0) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
-        val event = KeyEvent(now, now, action, key.keyCode, 0, key.metaState)
-        injectEvent(event)
+        injectEvent(keyEvent(action, key.keyCode, key.metaState))
     }
 
     override fun injectScroll(scroll: ControlEvent.Scroll) {
@@ -125,8 +147,8 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
         val coords = MotionEvent.PointerCoords().apply {
             x = realX
             y = realY
-            setAxisValue(MotionEvent.AXIS_HSCROLL, -scroll.deltaX.toFloat())
-            setAxisValue(MotionEvent.AXIS_VSCROLL, -scroll.deltaY.toFloat())
+            setAxisValue(MotionEvent.AXIS_HSCROLL, wheelNotches(-scroll.deltaX))
+            setAxisValue(MotionEvent.AXIS_VSCROLL, wheelNotches(-scroll.deltaY))
         }
 
         val event = MotionEvent.obtain(
@@ -137,23 +159,46 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
         event.recycle()
     }
 
-    override fun injectText(text: String) {
-        context?.let { ctx ->
-            try {
-                val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("webrtc-scrcpy", text)
-                clipboard.setPrimaryClip(clip)
+    /** Browser wheel deltas are pixels (about 100 per notch); Android scroll axes are in notches. */
+    private fun wheelNotches(deltaPx: Int): Float = (deltaPx / 100f).coerceIn(-5f, 5f)
 
-                // Inject paste shortcut (Ctrl + V)
-                val now = SystemClock.uptimeMillis()
-                val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_V, 0, KeyEvent.META_CTRL_ON)
-                val up = KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_V, 0, KeyEvent.META_CTRL_ON)
-                injectEvent(down)
-                injectEvent(up)
-                return
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to inject text via clipboard; falling back: ${e.message}")
+    /**
+     * Types text as key events, like a hardware keyboard. Characters the virtual keyboard cannot
+     * produce (CJK, emoji, ...) are pasted via the clipboard as a fallback.
+     */
+    override fun injectText(text: String) {
+        val kcm = keyCharacterMap
+        val pending = StringBuilder()
+        for (ch in text) {
+            val events = kcm?.getEvents(charArrayOf(ch))
+            if (events == null) {
+                pending.append(ch)
+                continue
             }
+            if (pending.isNotEmpty()) {
+                pasteViaClipboard(pending.toString())
+                pending.clear()
+            }
+            events.forEach { injectEvent(it) }
+        }
+        if (pending.isNotEmpty()) pasteViaClipboard(pending.toString())
+    }
+
+    private fun pasteViaClipboard(text: String) {
+        val ctx = context ?: run {
+            Log.w(TAG, "No context for clipboard paste; dropping ${text.length} chars")
+            return
+        }
+        try {
+            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("webrtc-scrcpy", text))
+            // Wait until the app has handled the paste (and so read the clipboard) before the next
+            // text chunk can overwrite the clipboard; otherwise rapid multi-character inputs can drop or duplicate
+            val ctrl = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+            injectEvent(keyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_V, ctrl), INJECT_MODE_WAIT_FOR_FINISH)
+            injectEvent(keyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_V, ctrl), INJECT_MODE_WAIT_FOR_FINISH)
+        } catch (e: Exception) {
+            Log.w(TAG, "Clipboard paste failed; dropping ${text.length} chars: ${e.message}")
         }
     }
 
@@ -168,15 +213,14 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
             else -> return
         }
 
-        val now = SystemClock.uptimeMillis()
-        injectEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
-        injectEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0))
+        injectEvent(keyEvent(KeyEvent.ACTION_DOWN, keyCode, 0))
+        injectEvent(keyEvent(KeyEvent.ACTION_UP, keyCode, 0))
     }
 
-    private fun injectEvent(event: InputEvent) {
+    private fun injectEvent(event: InputEvent, mode: Int = INJECT_MODE_ASYNC) {
         try {
-            // Mode 0 is INJECT_INPUT_EVENT_MODE_ASYNC to avoid blocking the caller thread
-            injectInputEventMethod?.invoke(inputManagerInstance, event, 0)
+            // ASYNC by default to avoid blocking the caller thread
+            injectInputEventMethod?.invoke(inputManagerInstance, event, mode)
         } catch (e: Exception) {
             Log.e(TAG, "injectInputEvent error: ${e.message}")
         }

@@ -12,6 +12,7 @@ import android.util.Size
 import com.webrtc.scrcpy.core.capture.ScreenGeometry
 import com.webrtc.scrcpy.core.capture.SurfaceControlCapturer
 import com.webrtc.scrcpy.core.input.NativeInputInjector
+import com.webrtc.scrcpy.core.webrtc.IceServerConfig
 import com.webrtc.scrcpy.core.webrtc.WebRtcEngine
 import org.webrtc.IceCandidate
 import java.net.Inet4Address
@@ -44,18 +45,28 @@ object DaemonMain {
         Looper.prepareMainLooper()
 
         var port = 8080
+        var token: String? = null
+        val iceServers = mutableListOf<IceServerConfig>()
         for (arg in args) {
             if (arg.startsWith("--port=")) {
                 port = arg.substring(7).toIntOrNull() ?: 8080
+            } else if (arg.startsWith("--token=")) {
+                token = arg.substring(8).takeIf { it.isNotBlank() }
+            } else if (arg.startsWith("--ice-server=")) {
+                // URL or URL|username|credential; may be repeated
+                val server = IceServerConfig.parse(arg.substring(13))
+                if (server != null) iceServers += server else System.err.println("[!] Ignoring invalid $arg")
             }
         }
+        // Without --token a new random token is used each run; pass one to keep a stable URL
+        val accessToken = token ?: EmbeddedServer.generateAccessToken()
 
         try {
             val context = getSystemContext()
             val injector = NativeInputInjector(context)
             println("[+] NativeInputInjector initialized (UID 2000 native input injection)")
 
-            val engine = WebRtcEngine(context, injector)
+            val engine = WebRtcEngine(context, injector, iceServers)
             // Mirror the whole real display and keep its aspect ratio, so touch mapping stays exact
             val displaySize = ScreenGeometry.realDisplaySize(context)
             if (displaySize == null) {
@@ -68,7 +79,7 @@ object DaemonMain {
             println("[+] SurfaceControlCapturer mirror capture started: ${deviceSize.width}x${deviceSize.height} -> ${captureSize.width}x${captureSize.height}")
 
             var server: EmbeddedServer? = null
-            server = EmbeddedServer(port, context, object : EmbeddedServer.SignalingListener {
+            server = EmbeddedServer(port, context, accessToken, object : EmbeddedServer.SignalingListener {
                 override fun onOfferReceived(sdp: String) {
                     println("[+] Received WebRTC SDP Offer from browser, creating Answer...")
                     engine.handleOffer(sdp) { answer ->
@@ -80,7 +91,7 @@ object DaemonMain {
                 override fun onIceCandidateReceived(sdpMid: String, sdpMLineIndex: Int, candidate: String) {
                     engine.addRemoteIceCandidate(IceCandidate(sdpMid, sdpMLineIndex, candidate))
                 }
-            })
+            }, iceServers)
 
             engine.onLocalIceCandidate = { candidate ->
                 server?.sendIceCandidate(candidate.sdpMid, candidate.sdpMLineIndex, candidate.sdp)
@@ -90,8 +101,9 @@ object DaemonMain {
             server.start(0, false)
             val lanIp = resolveLanIpAddress() ?: "<DEVICE_IP>"
             println("[+] Embedded web & signaling server ready on port $port")
-            println("[+] LAN access: http://$lanIp:$port")
-            println("[+] ADB tunnel access: http://localhost:$port")
+            if (iceServers.isNotEmpty()) println("[+] ICE servers: ${iceServers.joinToString { it.url }}")
+            println("[+] LAN access: http://$lanIp:$port/?token=$accessToken")
+            println("[+] ADB tunnel access: http://localhost:$port/?token=$accessToken")
         } catch (e: Throwable) {
             System.err.println("[-] Daemon startup error: ${e.message}")
             e.printStackTrace()

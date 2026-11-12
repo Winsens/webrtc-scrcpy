@@ -1,7 +1,9 @@
 package com.webrtc.scrcpy.core.capture
 
 import android.graphics.Rect
+import android.os.Handler
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import org.webrtc.CapturerObserver
@@ -16,12 +18,33 @@ import java.lang.reflect.Method
 class SurfaceControlCapturer(
     private val deviceWidth: Int = 1080,
     private val deviceHeight: Int = 1920
-) : VideoCapturer {
+) : VideoCapturer, RefreshableCapturer {
     private val TAG = "SurfaceControlCapturer"
 
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var capturerObserver: CapturerObserver? = null
     private var displayToken: IBinder? = null
+
+    @Volatile
+    private var isCapturing = false
+
+    @Volatile
+    private var lastFrameTimeMs = 0L
+
+    private var captureHandler: Handler? = null
+    private val frameForwarder = MonotonicFrameForwarder { capturerObserver }
+
+    // Re-emit the last frame while the screen is static so the encoder keeps producing keyframes
+    private val idleKeepAliveRunnable = object : Runnable {
+        override fun run() {
+            if (!isCapturing) return
+            val elapsed = SystemClock.uptimeMillis() - lastFrameTimeMs
+            if (lastFrameTimeMs > 0L && elapsed >= 450L) {
+                surfaceTextureHelper?.forceFrame()
+            }
+            captureHandler?.postDelayed(this, 500L)
+        }
+    }
 
     private var createDisplayMethod: Method? = null
     private var openTransactionMethod: Method? = null
@@ -88,9 +111,16 @@ class SurfaceControlCapturer(
                 closeTransactionMethod?.invoke(null)
             }
 
+            val handler = Handler(helper.handler.looper)
+            captureHandler = handler
+            isCapturing = true
+            lastFrameTimeMs = SystemClock.uptimeMillis()
             helper.startListening { videoFrame ->
-                capturerObserver?.onFrameCaptured(videoFrame)
+                lastFrameTimeMs = SystemClock.uptimeMillis()
+                frameForwarder.forward(videoFrame)
             }
+            handler.removeCallbacks(idleKeepAliveRunnable)
+            handler.postDelayed(idleKeepAliveRunnable, 500L)
             Log.i(TAG, "SurfaceControl mirror capture started: ${deviceWidth}x${deviceHeight} -> ${width}x${height} @ ${framerate}fps, LayerStack: 0")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start SurfaceControl capture: ${e.message}")
@@ -98,7 +128,22 @@ class SurfaceControlCapturer(
         }
     }
 
+    /**
+     * Re-emit the latest frame when a browser connects or refreshes, so a static screen is not black
+     */
+    override fun requestRefreshFrame() {
+        val helper = surfaceTextureHelper ?: return
+        val h = captureHandler ?: return
+        if (!isCapturing) return
+        h.post { helper.forceFrame() }
+        h.postDelayed({ if (isCapturing) helper.forceFrame() }, 120L)
+        h.postDelayed({ if (isCapturing) helper.forceFrame() }, 350L)
+    }
+
     override fun stopCapture() {
+        isCapturing = false
+        captureHandler?.removeCallbacksAndMessages(null)
+        captureHandler = null
         surfaceTextureHelper?.stopListening()
         displayToken?.let { token ->
             try {

@@ -36,13 +36,14 @@ object EmbeddedFallbackAssets {
         const v = document.getElementById('v');
         const st = document.getElementById('status');
         const ov = document.getElementById('overlay');
-        const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
+        const token = new URLSearchParams(location.search).get('token') || '';
+        const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws?token=' + encodeURIComponent(token));
         let pc, dc;
 
         ws.onopen = () => {
             st.innerText = 'Signaling connected';
             pc = new RTCPeerConnection({ iceServers:[{urls:'stun:stun.l.google.com:19302'}] });
-            dc = pc.createDataChannel("control", { ordered:false, maxRetransmits:0 });
+            dc = pc.createDataChannel("control", { ordered:true });
             dc.binaryType = "arraybuffer";
             dc.onopen = () => { st.innerText = 'Control ready'; };
             pc.ontrack = (e) => {
