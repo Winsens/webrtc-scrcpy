@@ -8,6 +8,8 @@ import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.util.Size
+import com.webrtc.scrcpy.core.capture.ScreenGeometry
 import com.webrtc.scrcpy.core.capture.SurfaceControlCapturer
 import com.webrtc.scrcpy.core.input.NativeInputInjector
 import com.webrtc.scrcpy.core.webrtc.WebRtcEngine
@@ -54,10 +56,16 @@ object DaemonMain {
             println("[+] NativeInputInjector initialized (UID 2000 native input injection)")
 
             val engine = WebRtcEngine(context, injector)
-            val capturer = SurfaceControlCapturer()
-            // 720p 30fps
-            engine.startScreenStream(capturer, 720, 1280, 30)
-            println("[+] SurfaceControlCapturer mirror capture started")
+            // Mirror the whole real display and keep its aspect ratio, so touch mapping stays exact
+            val displaySize = ScreenGeometry.realDisplaySize(context)
+            if (displaySize == null) {
+                System.err.println("[!] Could not read the display size; assuming 1080x1920, touches may be offset")
+            }
+            val deviceSize = displaySize ?: Size(1080, 1920)
+            val captureSize = ScreenGeometry.captureSize(deviceSize)
+            val capturer = SurfaceControlCapturer(deviceSize.width, deviceSize.height)
+            engine.startScreenStream(capturer, captureSize.width, captureSize.height, 30)
+            println("[+] SurfaceControlCapturer mirror capture started: ${deviceSize.width}x${deviceSize.height} -> ${captureSize.width}x${captureSize.height}")
 
             var server: EmbeddedServer? = null
             server = EmbeddedServer(port, context, object : EmbeddedServer.SignalingListener {
