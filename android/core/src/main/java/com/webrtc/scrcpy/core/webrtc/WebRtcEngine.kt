@@ -1,11 +1,9 @@
 package com.webrtc.scrcpy.core.webrtc
 
 import android.content.Context
-import android.hardware.display.DisplayManager
-import android.util.DisplayMetrics
 import android.util.Log
-import android.view.Display
 import com.webrtc.scrcpy.core.capture.MediaProjectionVideoCapturer
+import com.webrtc.scrcpy.core.capture.ScreenGeometry
 import com.webrtc.scrcpy.core.input.InputInjector
 import com.webrtc.scrcpy.core.protocol.ControlEvent
 import com.webrtc.scrcpy.core.protocol.ControlProtocolDecoder
@@ -143,22 +141,10 @@ class WebRtcEngine(
         audioTrack = pcf.createAudioTrack("audio_track_system", audioSource)
         audioTrack?.setEnabled(true)
 
-        var inputWidth = width
-        var inputHeight = height
-        try {
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
-            if (display != null) {
-                val metrics = DisplayMetrics()
-                @Suppress("DEPRECATION")
-                display.getRealMetrics(metrics)
-                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
-                    inputWidth = metrics.widthPixels
-                    inputHeight = metrics.heightPixels
-                }
-            }
-        } catch (_: Exception) {
-        }
+        // Touches are normalised over the frame, so map them onto the real display size
+        val displaySize = ScreenGeometry.realDisplaySize(context)
+        val inputWidth = displaySize?.width ?: width
+        val inputHeight = displaySize?.height ?: height
         inputInjector.setScreenDimensions(inputWidth, inputHeight)
         Log.i(TAG, "Started video and audio tracks: capture=${width}x${height} @ ${fps}fps, touch=${inputWidth}x${inputHeight}")
     }

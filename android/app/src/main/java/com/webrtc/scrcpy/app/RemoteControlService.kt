@@ -12,9 +12,11 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
+import android.util.Size
 import android.view.Display
 import androidx.core.app.NotificationCompat
 import com.webrtc.scrcpy.core.capture.MediaProjectionVideoCapturer
+import com.webrtc.scrcpy.core.capture.ScreenGeometry
 import com.webrtc.scrcpy.core.input.AccessibilityInputInjector
 import com.webrtc.scrcpy.core.input.InputInjector
 import com.webrtc.scrcpy.core.input.NativeInputInjector
@@ -154,9 +156,11 @@ class RemoteControlService : Service() {
         val engine = WebRtcEngine(this, injector)
         this.webRtcEngine = engine
 
-        // Default 720p (720x1280) 30fps
+        // Capture at the display's own aspect ratio (short side capped at 720), 30fps,
+        // so the frame has no black bars and touch mapping stays exact
+        val captureSize = ScreenGeometry.realDisplaySize(this)?.let { ScreenGeometry.captureSize(it) } ?: Size(720, 1280)
         val capturer = MediaProjectionVideoCapturer(mediaProjectionResultData)
-        engine.startScreenStream(capturer, 720, 1280, 30)
+        engine.startScreenStream(capturer, captureSize.width, captureSize.height, 30)
 
         // Start local HTTP + WebSocket signaling server (port 8080)
         val server = EmbeddedServer(8080, this, object : EmbeddedServer.SignalingListener {

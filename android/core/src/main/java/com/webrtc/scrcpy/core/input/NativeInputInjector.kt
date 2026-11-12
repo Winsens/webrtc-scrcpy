@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -93,7 +94,7 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
 
         val event = MotionEvent.obtain(
             now, now, finalAction, propArray.size, propArray, coordsArray,
-            0, 0, 1.0f, 1.0f, 0, 0, 0, 0
+            0, 0, 1.0f, 1.0f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
         )
 
         injectEvent(event)
@@ -130,7 +131,7 @@ class NativeInputInjector(private val context: Context? = null) : InputInjector 
 
         val event = MotionEvent.obtain(
             now, now, MotionEvent.ACTION_SCROLL, 1, arrayOf(prop), arrayOf(coords),
-            0, 0, 1.0f, 1.0f, 0, 0, 0, 0
+            0, 0, 1.0f, 1.0f, 0, 0, InputDevice.SOURCE_MOUSE, 0
         )
         injectEvent(event)
         event.recycle()
